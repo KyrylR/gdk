@@ -324,6 +324,14 @@ fn handle_call(method: &str, input: &str) -> Result<String, Error> {
             to_string(&sweep::get_unspent_outputs_for_private_key(&param)?)
         }
 
+        "options_test" => {
+            info!("options_test called with input: {}", input);
+            to_string(&json!({
+                "status": "ok",
+                "message": "options_test executed successfully"
+            }))
+        }
+
         _ => {
             return Err(Error::MethodNotFound {
                 method: method.to_string(),
