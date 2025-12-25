@@ -54,7 +54,12 @@ verbose=false
 
 
 if [ "$(uname)" = "Darwin" ]; then
-    GETOPT='/usr/local/opt/gnu-getopt/bin/getopt'
+    # Support homebrew.
+    if [ -f '/opt/homebrew/opt/gnu-getopt/bin/getopt' ]; then
+        GETOPT='/opt/homebrew/opt/gnu-getopt/bin/getopt'
+    else
+        GETOPT='/usr/local/opt/gnu-getopt/bin/getopt'
+    fi
 elif [ "$(uname)" = "FreeBSD" ]; then
     GETOPT='/usr/local/bin/getopt'
 fi

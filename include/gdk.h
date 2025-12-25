@@ -1137,6 +1137,15 @@ GDK_API int GA_get_networks(GA_json** output);
  */
 GDK_API int GA_get_uniform_uint32_t(uint32_t upper_bound, uint32_t* output);
 
+/**
+ * Test function to verify custom GDK build
+ *
+ * :param input: Input JSON string
+ * :param output: Destination for the result JSON string.
+ *|     Returned string should be freed using `GA_destroy_string`.
+ */
+GDK_API int GA_options_test(const char* input, char** output);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

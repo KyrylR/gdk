@@ -800,6 +800,25 @@ extern "C" int GA_generate_mnemonic(char** output) { return generate_mnemonic<32
 
 extern "C" int GA_generate_mnemonic_12(char** output) { return generate_mnemonic<16>(output); }
 
+extern "C" int GA_options_test(const char* input, char** output)
+{
+    if (!output) {
+        return GA_ERROR;
+    }
+    *output = nullptr;
+    try {
+        char* rust_output = nullptr;
+        int ret = GDKRUST_call("options_test", input ? input : "{}", &rust_output);
+        if (ret == GA_OK && rust_output) {
+            *output = strdup(rust_output);
+            GDKRUST_destroy_string(rust_output);
+        }
+        return ret;
+    } catch (const std::exception& e) {
+        return GA_ERROR;
+    }
+}
+
 extern "C" int GA_validate_mnemonic(const char* mnemonic, uint32_t* valid)
 {
     if (!mnemonic || !valid) {
