@@ -328,7 +328,7 @@ fn handle_call(method: &str, input: &str) -> Result<String, Error> {
             info!("options_test called with input: {}", input);
             to_string(&json!({
                 "status": "ok",
-                "message": "options_test executed successfully"
+                "message": "options_test executed successfully -- new message."
             }))
         }
 
