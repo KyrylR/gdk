@@ -11,7 +11,7 @@ use std::ffi::CString;
 use std::io::Write;
 use std::os::raw::c_char;
 use std::str::FromStr;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gdk_common::model::InitParam;
@@ -21,6 +21,9 @@ use gdk_common::log::{self, debug, info, LevelFilter, Metadata, Record};
 use gdk_common::session::{JsonError, Session};
 use gdk_electrum::{sweep, ElectrumSession};
 use serde::Serialize;
+use simplicityhl::tracker::DefaultTracker;
+use simplicityhl_core::ProgramError;
+use std::cell::RefCell;
 
 pub const GA_OK: i32 = 0;
 pub const GA_ERROR: i32 = -1;
@@ -50,7 +53,7 @@ impl From<Error> for JsonError {
 
 static INIT_LOGGER: Once = Once::new();
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_create_session(
     ret: *mut *const libc::c_void,
     network: *const c_char,
@@ -131,7 +134,7 @@ fn create_session(network: &Value) -> Result<GdkSession, Value> {
     Ok(gdk_session)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_call_session(
     ptr: *mut libc::c_void,
     method: *const c_char,
@@ -177,8 +180,8 @@ fn call_session(sess: &mut GdkSession, method: &str, input: &str) -> Result<Valu
     if method == "exchange_rates" {
         let params = serde_json::from_value(input)?;
 
-        let ticker = match sess.backend {
-            GdkBackend::Electrum(ref mut s) => exchange_rates::fetch_cached(s, &params),
+        let ticker = match &mut sess.backend {
+            GdkBackend::Electrum(s) => exchange_rates::fetch_cached(s, &params),
         }?;
 
         let rate = ticker.map(|t| format!("{:.8}", t.rate)).unwrap_or_default();
@@ -209,8 +212,8 @@ fn call_session(sess: &mut GdkSession, method: &str, input: &str) -> Result<Valu
 
     info!("GDKRUST_call_session handle_call {} input {:?}", method, input_redacted);
 
-    let res = match sess.backend {
-        GdkBackend::Electrum(ref mut s) => s.handle_call(&method, input),
+    let res = match &mut sess.backend {
+        GdkBackend::Electrum(s) => s.handle_call(&method, input),
     };
 
     let methods_to_redact_out =
@@ -226,7 +229,7 @@ fn call_session(sess: &mut GdkSession, method: &str, input: &str) -> Result<Valu
     res
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_set_notification_handler(
     ptr: *mut libc::c_void,
     handler: extern "C" fn(*const libc::c_void, *const c_char),
@@ -239,7 +242,7 @@ pub extern "C" fn GDKRUST_set_notification_handler(
     let backend = &mut sess.backend;
 
     match backend {
-        GdkBackend::Electrum(ref mut s) => s.notify.set_native((handler, self_context)),
+        GdkBackend::Electrum(s) => s.notify.set_native((handler, self_context)),
     };
 
     info!("set notification handler");
@@ -247,7 +250,7 @@ pub extern "C" fn GDKRUST_set_notification_handler(
     GA_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_destroy_string(ptr: *mut c_char) {
     unsafe {
         // retake pointer and drop
@@ -255,7 +258,7 @@ pub extern "C" fn GDKRUST_destroy_string(ptr: *mut c_char) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_destroy_session(ptr: *mut libc::c_void) {
     unsafe {
         // retake pointer and drop
@@ -278,7 +281,7 @@ fn to_string<T: Serialize>(value: &T) -> String {
         .expect("Default Serialize impl with maps containing only string keys")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn GDKRUST_call(
     method: *const c_char,
     input: *const c_char,
@@ -326,9 +329,218 @@ fn handle_call(method: &str, input: &str) -> Result<String, Error> {
 
         "options_test" => {
             info!("options_test called with input: {}", input);
+
+            use simplicityhl::elements::confidential::{Asset, Value};
+            use simplicityhl::simplicity::bitcoin::key::Keypair;
+            use simplicityhl::simplicity::bitcoin::secp256k1;
+            use simplicityhl::simplicity::bitcoin::secp256k1::Secp256k1;
+            use simplicityhl::simplicity::elements::{self, AssetId, OutPoint, Txid};
+            use simplicityhl::simplicity::hashes::Hash;
+            use std::str::FromStr;
+
+            use simplicityhl::elements::pset::PartiallySignedTransaction;
+            use simplicityhl::elements::taproot::ControlBlock;
+            use simplicityhl::elements::{ContractHash, Script};
+            use simplicityhl::simplicity::jet::elements::ElementsUtxo;
+            use simplicityhl_core::{LIQUID_TESTNET_TEST_ASSET_ID_STR, LIQUID_TESTNET_BITCOIN_ASSET};
+
+            use simplicityhl_core::run_program;
+
+            use simplicityhl::simplicity::jet::elements::ElementsEnv;
+
+            use simplicityhl::tracker::TrackerLogLevel;
+            use simplicityhl::elements::TxOut;
+            use simplicityhl::elements::AddressParams;
+
+            fn get_creation_pst(
+                keypair: &Keypair,
+                start_time: u32,
+                expiry_time: u32,
+                collateral_per_contract: u64,
+                settlement_per_contract: u64,
+            ) -> (
+                (PartiallySignedTransaction, contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen),
+                contracts::options::OptionsArguments,
+            ) {
+                let option_outpoint = OutPoint::new(Txid::from_slice(&[1; 32]).unwrap(), 0);
+                let grantor_outpoint = OutPoint::new(Txid::from_slice(&[2; 32]).unwrap(), 0);
+
+                let issuance_asset_entropy = [1; 32];
+
+                let option_arguments = contracts::options::OptionsArguments {
+                    start_time,
+                    expiry_time,
+                    collateral_per_contract,
+                    settlement_per_contract,
+                    collateral_asset_id: simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET.into_inner().0,
+                    settlement_asset_id: AssetId::from_str(simplicityhl_core::LIQUID_TESTNET_TEST_ASSET_ID_STR).unwrap()
+                        .into_inner()
+                        .0,
+                    option_token_entropy: AssetId::generate_asset_entropy(
+                        option_outpoint,
+                        ContractHash::from_byte_array(issuance_asset_entropy),
+                    )
+                        .0,
+                    grantor_token_entropy: AssetId::generate_asset_entropy(
+                        grantor_outpoint,
+                        ContractHash::from_byte_array(issuance_asset_entropy),
+                    )
+                        .0,
+                };
+
+                (
+                    contracts::sdk::build_option_creation(
+                        &keypair.public_key(),
+                        (
+                            option_outpoint,
+                            TxOut {
+                                asset: Asset::Explicit(*simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET),
+                                value: Value::Explicit(500),
+                                nonce: elements::confidential::Nonce::Null,
+                                script_pubkey: Script::new(),
+                                witness: elements::TxOutWitness::default(),
+                            },
+                        ),
+                        (
+                            grantor_outpoint,
+                            TxOut {
+                                asset: Asset::Explicit(*simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET),
+                                value: Value::Explicit(1000),
+                                nonce: elements::confidential::Nonce::Null,
+                                script_pubkey: Script::new(),
+                                witness: elements::TxOutWitness::default(),
+                            },
+                        ),
+                        &option_arguments,
+                        issuance_asset_entropy,
+                        100,
+                        &AddressParams::LIQUID_TESTNET,
+                    ).unwrap(),
+                    option_arguments,
+                )
+            }
+
+            let keypair = Keypair::from_secret_key(
+                &Secp256k1::new(),
+                &secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+            );
+
+            let collateral_per_contract = 20;
+            let settlement_per_contract = 25;
+
+            let ((_, option_pubkey_gen), option_arguments) = get_creation_pst(
+                &keypair,
+                0,
+                0,
+                collateral_per_contract,
+                settlement_per_contract,
+            );
+
+            let collateral_amount = 1000;
+            let option_token_amount = collateral_amount / collateral_per_contract;
+            let amount_to_burn = option_token_amount / 2;
+
+            let (option_asset_id, _) = option_arguments.get_option_token_ids();
+            let (grantor_asset_id, _) = option_arguments.get_grantor_token_ids();
+
+            let (pst, option_branch) = contracts::sdk::build_option_cancellation(
+                (
+                    OutPoint::default(),
+                    TxOut {
+                        asset: Asset::Explicit(*LIQUID_TESTNET_BITCOIN_ASSET),
+                        value: Value::Explicit(collateral_amount),
+                        nonce: elements::confidential::Nonce::Null,
+                        script_pubkey: option_pubkey_gen.address.script_pubkey(),
+                        witness: elements::TxOutWitness::default(),
+                    },
+                ),
+                (
+                    OutPoint::default(),
+                    TxOut {
+                        asset: Asset::Explicit(option_asset_id),
+                        value: Value::Explicit(option_token_amount),
+                        nonce: elements::confidential::Nonce::Null,
+                        script_pubkey: Script::new(),
+                        witness: elements::TxOutWitness::default(),
+                    },
+                ),
+                (
+                    OutPoint::default(),
+                    TxOut {
+                        asset: Asset::Explicit(grantor_asset_id),
+                        value: Value::Explicit(option_token_amount),
+                        nonce: elements::confidential::Nonce::Null,
+                        script_pubkey: Script::new(),
+                        witness: elements::TxOutWitness::default(),
+                    },
+                ),
+                (
+                    OutPoint::default(),
+                    TxOut {
+                        asset: Asset::Explicit(*LIQUID_TESTNET_BITCOIN_ASSET),
+                        value: Value::Explicit(100),
+                        nonce: elements::confidential::Nonce::Null,
+                        script_pubkey: Script::new(),
+                        witness: elements::TxOutWitness::default(),
+                    },
+                ),
+                &option_arguments,
+                amount_to_burn,
+                50,
+            ).unwrap();
+
+            let program = contracts::options::get_compiled_options_program(&option_arguments);
+
+            let env = ElementsEnv::new(
+                Arc::new(pst.extract_tx().unwrap()),
+                vec![ElementsUtxo {
+                    script_pubkey: option_pubkey_gen.address.script_pubkey(),
+                    asset: Asset::Explicit(*LIQUID_TESTNET_BITCOIN_ASSET),
+                    value: Value::Explicit(collateral_amount),
+                }],
+                0,
+                simplicityhl::simplicity::Cmr::from_byte_array([0; 32]),
+                ControlBlock::from_slice(&[0xc0; 33]).unwrap(),
+                None,
+                elements::BlockHash::all_zeros(),
+            );
+
+            let witness_values = contracts::options::build_witness::build_option_witness(option_branch);
+
+            let satisfied = program
+                .satisfy(witness_values)
+                .map_err(ProgramError::WitnessSatisfaction).unwrap();
+
+            let logs: RefCell<Vec<String>> = RefCell::new(Vec::new());
+
+            let mut tracker = DefaultTracker::new(satisfied.debug_symbols())
+                .with_debug_sink(|label, value| {
+                    logs.borrow_mut().push(format!("DBG: {label} = {value}"));
+                })
+                .with_jet_trace_sink(|jet, args, result| {
+                    let args_str = match args {
+                        Some(args) => args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
+                        None => "...".to_string(),
+                    };
+                    let result_str = match result {
+                        Some(v) => v.to_string(),
+                        None => "[failed]".to_string(),
+                    };
+                    logs.borrow_mut().push(format!("{jet:?}({args_str}) = {result_str}"));
+                })
+                .with_warning_sink(|message| {
+                    logs.borrow_mut().push(format!("WARN: {message}"));
+                });
+
+            let pruned = satisfied.redeem().prune_with_tracker(&env, &mut tracker);
+
+            let collected_logs = logs.borrow().clone();
+
             to_string(&json!({
                 "status": "ok",
-                "message": "options_test executed successfully -- new message."
+                "result": pruned.is_ok(),
+                "message": format!("options_test executed successfully -- result: {}", pruned.is_ok()),
+                "logs": collected_logs
             }))
         }
 

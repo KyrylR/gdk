@@ -2,7 +2,8 @@
 name = "gdk-electrum"
 version = "0.1.0"
 authors = ["Riccardo Casatta <riccardo@casatta.it>"]
-edition = "2018"
+edition = "2024"
+rust-version = "1.90.0"
 
 [features]
 testing = ["gdk-common/testing"]

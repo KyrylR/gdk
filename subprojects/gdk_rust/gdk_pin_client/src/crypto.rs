@@ -57,7 +57,7 @@ impl<const BYTES: usize> Salt<BYTES> {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            bytes: rand::thread_rng().gen::<[u8; BYTES]>(),
+            bytes: rand::thread_rng().r#gen::<[u8; BYTES]>(),
         }
     }
 

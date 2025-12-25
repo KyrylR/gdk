@@ -6,7 +6,8 @@ authors = [
     "Nadav Ivgi <nadav@shesek.info>",
 ]
 license = "(MIT)"
-edition = "2018"
+edition = "2024"
+rust-version = "1.90.0"
 
 [lib]
 crate-type = ["staticlib"]
@@ -20,6 +21,10 @@ libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
+
+simplicityhl = { version = "0.4.0" }
+contracts = { git = "https://github.com/BlockstreamResearch/simplicity-contracts.git", rev = "b3d1ae9", package = "contracts" }
+simplicityhl-core = { version = "0.3.1", package = "simplicityhl-core" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.8.6"
